@@ -2,6 +2,8 @@ import asyncio
 import aiomysql
 import logging
 
+logging.basicConfig(filename='example.log',level=logging.DEBUG)
+
 # 异步
 # 创建数据库连接池
 async def create_pool(loop,**kw):
@@ -50,83 +52,6 @@ async def execute(sql, args):
         except BaseException as e:
             raise e
         return affected
-
-
-# ORM
-# Model, 所有ORM映射的基类
-class Model(dict, metaclass= ModelMetaClass):
-
-    # 继承自dict
-    def __init__(self, **kw):
-        super(Model, self).__init__(**kw)
-
-    def __getattr__(self, key):                         # user.id = user['id']
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(r"'Model' object has no attribute '%s'" % key)
-
-    def __setattr__(self, key, value):
-        self[key] = value
-
-    def get_value(self,key):
-        return getattr(self, key, None)
-
-    def getValueOrDefault(self,key):
-        value = getattr(self, key, None)
-        if value is None:
-            field = self.__mappings__[key]
-            if field.default is not None:               # value 可以是函数(callable,可调用对象)
-                value = field.default() if callable(field.default) else field.default
-                logging.debug('using default value for %s: %s' % (key, str(value)))
-                setattr(self, key, value)
-        return value
-
-    # 一步异步，处处异步，所以这些方法都必须是一个协程
-    # 下面 self.__mappings__,self.__insert__等变量据是根据对应表的字段不同，而动态创建
-    async def save(self):
-        args = list(map(self.getValueOrDefault, self.__mappings__))   # 遍历__mappings__中的key,映射到getValueOrDefault
-        await execute(self.__insert__, args)
-
-    async def remove(self):
-        args = []
-        args.append(self[self.__primaryKey__])
-        print(self.__delete__)
-        await execute(self.__delete__, args)
-
-    async def update(self, **kw):
-        print("enter update")
-        args = []
-        for key in kw:
-            if key not in self.__fields__:
-                raise RuntimeError("field not found")
-        for key in self.__fields__:
-            if key in kw:
-                args.append(kw[key])
-            else:
-                args.append(getattr(self, key, None))
-        args.append(getattr(self, self.__primaryKey__))
-        await execute(self.__update__, args)
-
-    # 类方法
-    @classmethod
-    async def find(cls, pk):
-        rs = await select('%s where `%s`=?' % (cls.__select__, cls.__primaryKey__), [pk], 1)
-        if len(rs) == 0:
-            return None
-        return cls(**rs[0])  # 返回的是一个实例对象引用
-
-    @classmethod
-    async def findAll(cls, where=None, args=None):
-        sql = [cls.__select__]
-        if where:
-            sql.append('where')
-            sql.append(where)
-        if args is None:
-            args = []
-        rs = await select(' '.join(sql), args)
-        return [cls(**r) for r in rs]
-
 
 # 'metaclass'必须是可调用(callable)的，并且返回一个'type'。当我们想要动态地创建类时，利用type是一个很合适的解决方案。
 class ModelMetaClass(type):
@@ -191,11 +116,96 @@ class ModelMetaClass(type):
         # 构造默认的SELECT, INSERT, UPDATE和DELETE语句:
         attrs['__select__'] = "select %s, %s from %s" % (primaryKey, ', '.join(escaped_fields), tableName)
         attrs['__insert__'] = "insert into %s (%s, %s) values (%s)" % (
-        tableName, ', '.join(escaped_fields), primaryKey, create_args_string(len(escaped_fields) + 1))
+            tableName, primaryKey, ', '.join(escaped_fields), create_args_string(len(escaped_fields) + 1))
         attrs['__update__'] = "update %s set %s where %s=?" % (
-        tableName, ', '.join(map(lambda f: '%s=?' % (mappings.get(f).name or f), fields)), primaryKey)
+            tableName, ', '.join(map(lambda f: '%s=?' % (mappings.get(f).name or f), fields)), primaryKey)
         attrs['__delete__'] = "delete from %s where %s=?" % (tableName, primaryKey)
         return type.__new__(cls, name, bases, attrs)
+
+
+def create_args_string(num):
+    # 用来计算需要拼接多少个占位符
+    L = []
+    for n in range(num):
+        L.append('?')
+    return ', '.join(L)
+
+
+# ORM
+# Model, 所有ORM映射的基类
+class Model(dict, metaclass=ModelMetaClass):
+
+    # 继承自dict
+    def __init__(self, **kw):
+        super(Model, self).__init__(**kw)
+
+    def __getattr__(self, key):                         # user.id = user['id']
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(r"'Model' object has no attribute '%s'" % key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def get_value(self, key):
+        return getattr(self, key, None)
+
+    def getValueOrDefault(self, key):
+        value = getattr(self, key, None)
+        if value is None:
+            field = self.__mappings__[key]
+            if field.default is not None:               # value 可以是函数(callable,可调用对象)
+                value = field.default() if callable(field.default) else field.default
+                logging.debug('using default value for %s: %s' % (key, str(value)))
+                setattr(self, key, value)
+        return value
+
+    # 一步异步，处处异步，所以这些方法都必须是一个协程
+    # 下面 self.__mappings__,self.__insert__等变量据是根据对应表的字段不同，而动态创建
+    async def save(self):
+        args = list(map(self.getValueOrDefault, self.__mappings__))   # 遍历__mappings__中的key,映射到getValueOrDefault
+        await execute(self.__insert__, args)
+
+    async def remove(self):
+        args = []
+        args.append(self[self.__primaryKey__])
+        print(self.__delete__)
+        await execute(self.__delete__, args)
+
+    async def update(self, **kw):
+        print("enter update")
+        args = []
+        for key in kw:
+            if key not in self.__fields__:
+                raise RuntimeError("field not found")
+        for key in self.__fields__:
+            if key in kw:
+                args.append(kw[key])
+            else:
+                args.append(getattr(self, key, None))
+        args.append(getattr(self, self.__primaryKey__))
+        await execute(self.__update__, args)
+
+    # 类方法
+    @classmethod
+    async def find(cls, pk):
+        rs = await select('%s where `%s`=?' % (cls.__select__, cls.__primaryKey__), [pk], 1)
+        if len(rs) == 0:
+            return None
+        return cls(**rs[0])  # 返回的是一个实例对象引用
+
+    @classmethod
+    async def findAll(cls, where=None, args=None):
+        sql = [cls.__select__]
+        if where:
+            sql.append('where')
+            sql.append(where)
+        if args is None:
+            args = []
+        rs = await select(' '.join(sql), args)
+        return [cls(**r) for r in rs]
+
 
 
 
@@ -214,13 +224,25 @@ class Field():
 
 
 class StringField(Field):
-
     def __init__(self, name=None, primary_key=False, default=None, ddl='varchar(100)'):
-      super(StringField,self).__init__(name,ddl,primary_key,default)
+      super(StringField,self).__init__(name,ddl, primary_key, default)
+
+# Bool在MYSQL中自动识别为Tinyint(1). true,false,TRUE,FALSE,它们分别代表1,0,1,0.
+class BooleanField(Field):
+    def __init__(self, name=None, default=0):
+      super(BooleanField,self).__init__(name, 'boolean', False, default)
 
 
+class IntegerField(Field):
+    def __init__(self, name=None, primary_key=False, default=0):
+      super(IntegerField,self).__init__(name, 'bigint', primary_key, default)
+
+# Real在MYSQL中自动识别为Double.
+class FloatField(Field):
+    def __init__(self, name=None, primary_key=False, default=0.0):
+      super(FloatField,self).__init__(name, 'real', primary_key, default)
 
 
-
-
-
+class TextField(Field):
+    def __init__(self, name=None, primary_key=False, default=None):
+      super(TextField,self).__init__(name, 'text', primary_key, default)
